@@ -1,3 +1,5 @@
+<img width="2512" height="1076" alt="image" src="https://github.com/user-attachments/assets/25447b12-cd34-4ed7-80e3-d4573715629a" />
+
 # Preface
 
 Inspired by the infamous pain paper, I wanted to see what would happen if the same techniques were used for pleasure, or euphoria, and other similar positive types of emotions. (although this could be used for negative emotions as well)
