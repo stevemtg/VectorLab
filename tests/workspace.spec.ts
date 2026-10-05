@@ -48,6 +48,7 @@ test("real extraction, sliders, streamed inference, measured tensors, deletion",
   expect(await page.locator(".layer-bar").count()).toBe(28);
   await expect(page.locator(".tensor-stats")).toContainText("1,536");
   await page.getByRole("button", { name: `Delete ${name}`, exact: true }).click();
+  await page.getByRole("alertdialog").getByRole("button", { name: "Delete vector", exact: true }).click();
   await expect(page.getByRole("switch", { name: `Enable ${name}`, exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });

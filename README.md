@@ -134,7 +134,7 @@ Neither runtime imposes an application-level generated-token limit. A response c
 
 Vectors and their prompt pairs are stored in **`data/vectors/`**, which is excluded from Git. Each vector is bound to the SHA-256 identity of its model blob, so a vector from a different checkpoint is rejected. Saved vectors reload at neutral strength; chat history and slider values remain local to the browser session.
 
-Deleting a vector removes its metadata and NumPy file. Older unit-normalized vectors are labeled **Legacy** and retain their original injection across layers. Re-extract a concept to use the current raw-vector method.
+To delete a saved vector, click its trash icon in **Vector library** and confirm **Delete vector**. This removes the vector from active steering and permanently deletes its metadata and NumPy file. Deletion is available when the workspace is idle. Older unit-normalized vectors are labeled **Legacy** and retain their original injection across layers. Re-extract a concept to use the current raw-vector method.
 
 The launcher binds the bridge to loopback. The API validates the request's Host and browser Origin, requires `X-Vector-Lab: 1` on mutations, and accepts model names from Ollama's installed catalog. Model operations are serialized, coefficient values are bounded, and stored arrays are loaded with `allow_pickle=False`.
 

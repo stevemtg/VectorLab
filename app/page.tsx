@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Activity, AudioLines, Box, Check, CheckCheck, ChevronRight, CircleHelp, Copy, Cpu, FlaskConical, Layers3, LoaderCircle, MessageSquare, Pause, Play, Plus, RotateCcw, Send, SlidersHorizontal, Sparkles, Square, Terminal, Trash2, TriangleAlert, Waves, X, PlugZap } from "lucide-react";
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DEFAULT_WORKSPACE_PREFERENCES, WORKSPACE_PREFERENCES_KEY, WorkspaceSettings, readWorkspacePreferences, type WorkspacePreferences } from "@/components/workspace-settings";
 import { api, streamChat, decorateVectors, injectionDescription, vectorSummary, signed, COLORS, PRESETS, type ConceptVector, type Connection, type Engine, type LocalModel, type LogEntry, type Message, type Metrics, type PoolingMode, type StoredVector } from "@/lib/model-api";
@@ -36,6 +37,9 @@ export default function Home() {
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState("");
   const [vectors, setVectors] = useState<ConceptVector[]>([]);
+  const [vectorToDelete, setVectorToDelete] = useState<ConceptVector | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const [injection, setInjection] = useState(true);
   const [vectorName, setVectorName] = useState("Pleasure");
   const [positive, setPositive] = useState(PRESETS[0].positive);
@@ -61,6 +65,8 @@ export default function Home() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const nameRef = useRef<HTMLInputElement>(null);
+  const libraryRef = useRef<HTMLDivElement>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const vectorsRef = useRef(vectors);
   const connectionRef = useRef(connection);
   const active = vectors.filter(v => v.enabled);
@@ -68,7 +74,7 @@ export default function Home() {
   const applied = injection && nativeReady ? active.filter(v => v.value !== 0) : [];
   const selected = vectors.find(v => v.id === selection);
   const extreme = applied.some(v => Math.abs(v.value) >= 3);
-  const busy = connecting || streaming || extracting;
+  const busy = connecting || streaming || extracting || deleting;
   const measured = Object.values(metrics.alignments ?? {}).filter((v): v is number => v !== null);
   const cosine = measured.length ? measured.reduce((a, b) => a + b, 0) / measured.length : null;
   const norms = metrics.layer_norms ?? [];
@@ -152,8 +158,18 @@ export default function Home() {
 
   async function deleteVector(vector: ConceptVector) {
     if (operationLock.current) return;
-    try { await api(`/api/vectors/${vector.id}`, undefined, "DELETE"); setVectors(prev => prev.filter(v => v.id !== vector.id)); setSelection(""); addLog("INFO", `Deleted '${vector.name}' from this model's vector library.`); }
-    catch (error) { setNotice((error as Error).message); }
+    operationLock.current = true; setDeleting(true); setDeleteError("");
+    try {
+      await api(`/api/vectors/${encodeURIComponent(vector.id)}`, undefined, "DELETE");
+      setVectors(prev => prev.filter(v => v.id !== vector.id));
+      setConnection(prev => ({ ...prev, vectors: prev.vectors.filter(v => v.id !== vector.id) }));
+      setSelection(current => current === vector.id ? vectors.find(v => v.id !== vector.id)?.id ?? "" : current);
+      setExtraction(current => current?.id === vector.id ? null : current);
+      setVectorToDelete(null);
+      addLog("INFO", `Deleted '${vector.name}' from this model's vector library.`);
+      setNotice(`${vector.name} deleted from the vector library.`);
+    } catch (error) { setDeleteError((error as Error).message); addLog("WARN", (error as Error).message); }
+    finally { operationLock.current = false; setDeleting(false); }
   }
 
   async function stopStream() {
@@ -218,11 +234,11 @@ export default function Home() {
     </header>
     <div className={`workspace-grid ${workspacePreferences.showTelemetry ? "" : "telemetry-hidden"}`}>
       <aside className="left-sidebar">
-        <section className="library-section"><SectionTitle icon={Layers3} extra={<span className="count-badge">{vectors.length}</span>}>Vector library</SectionTitle><p className="section-description">Extracted for the connected model.</p><div className="vector-library">
-          {vectors.map((v, index) => { const Icon = ICONS[index % ICONS.length]; return <div key={v.id} className={`library-vector ${selection === v.id ? "selected" : ""}`} style={{ "--vector-color": v.color } as CSSProperties}><button className="vector-select" onClick={() => setSelection(v.id)} aria-pressed={selection === v.id}><span className="vector-icon"><Icon size={16}/></span><span className="vector-info"><strong>{v.name}</strong><small>{vectorSummary(v)}</small></span></button><Switch aria-label={`Enable ${v.name}`} checked={v.enabled} disabled={!nativeReady} onCheckedChange={enabled => { setVectors(prev => prev.map(item => item.id === v.id ? { ...item, enabled } : item)); addLog("INFO", `${enabled ? "Enabled" : "Disabled"} '${v.name}' for the next completion.`); }} className="vector-switch"/></div>; })}
+        <section className="library-section"><SectionTitle icon={Layers3} extra={<span className="count-badge">{vectors.length}</span>}>Vector library</SectionTitle><p className="section-description">Extracted for the connected model.</p><div className="vector-library" ref={libraryRef}>
+          {vectors.map((v, index) => { const Icon = ICONS[index % ICONS.length]; return <div key={v.id} className={`library-vector ${selection === v.id ? "selected" : ""}`} style={{ "--vector-color": v.color } as CSSProperties}><button className="vector-select" onClick={() => setSelection(v.id)} aria-pressed={selection === v.id}><span className="vector-icon"><Icon size={16}/></span><span className="vector-info"><strong>{v.name}</strong><small>{vectorSummary(v)}</small></span></button><Switch aria-label={`Enable ${v.name}`} checked={v.enabled} disabled={!nativeReady} onCheckedChange={enabled => { setVectors(prev => prev.map(item => item.id === v.id ? { ...item, enabled } : item)); addLog("INFO", `${enabled ? "Enabled" : "Disabled"} '${v.name}' for the next completion.`); }} className="vector-switch"/><button type="button" className="icon-button vector-delete" disabled={busy} aria-label={`Delete ${v.name}`} title={`Delete ${v.name}`} onClick={event => { deleteTriggerRef.current = event.currentTarget; setDeleteError(""); setVectorToDelete(v); }}><Trash2 size={15}/></button></div>; })}
           {!vectors.length && <p className="library-empty">No extracted vectors yet. Start with a concept pair below.</p>}
         </div><div className="preset-grid">{PRESETS.map(p => <button key={p.name} disabled={busy} onClick={() => applyPreset(p)} style={{ color: p.color }} title={`Use the ${p.name} contrastive pair`}><Plus size={12}/>{p.name}</button>)}</div><button className="add-vector-button" disabled={busy} onClick={() => { setVectorName(""); setExtraction(null); setFormError(""); nameRef.current?.focus(); }}><Plus size={15}/> Create custom vector</button>
-          {selected && <div className="selected-detail"><span>Contrast L2 {selected.difference_norm.toFixed(2)} · {injectionDescription(selected)}</span><button className="icon-button" disabled={busy} aria-label={`Delete ${selected.name}`} onClick={() => deleteVector(selected)}><Trash2 size={13}/></button></div>}
+          {selected && <div className="selected-detail"><span>Contrast L2 {selected.difference_norm.toFixed(2)} · {injectionDescription(selected)}</span></div>}
         </section>
         <section className="extraction-section"><SectionTitle icon={FlaskConical} extra={<span className="tiny-tag">RAW DIFF</span>}>Extract a vector</SectionTitle><p className="section-description">One sample per line. The raw activation contrast is measured on the model.</p><form onSubmit={extractVector} className="extraction-form">
           <label htmlFor="vector-name">Vector name</label><input ref={nameRef} id="vector-name" value={vectorName} onChange={e => { setVectorName(e.target.value); setFormError(""); }} maxLength={32} disabled={!ready || busy} placeholder="e.g. Curiosity" autoComplete="off"/>
@@ -253,5 +269,24 @@ export default function Home() {
         <section className="terminal-section"><div className="terminal-heading"><span><Terminal size={14}/> Event stream</span><span className="terminal-count">{logs.length} events</span></div><div className="terminal-content" role="log" aria-label="Model event log" aria-live="off">{[...logs].reverse().map(log => <div className="log-line" key={log.id}><div><time>{log.time}</time><span className={`log-level log-${log.level.toLowerCase()}`}>[{log.level}]</span></div><p>{log.message}</p></div>)}</div><div className="terminal-footer"><span className={`status-dot ${connection.connected ? "green-dot" : "muted-dot"}`}/>{streaming ? "Receiving model output" : "Waiting for the next operation"}<span className="terminal-cursor">_</span></div></section><div className="telemetry-note"><Cpu size={13}/><span>{connection.engine === "native" ? "llama.cpp b11146 · CPU tensor capture" : "Local runtime · no fabricated metrics"}</span></div>
       </aside>}
     </div>{notice && <div className="toast" role="status"><Check size={16}/><span>{notice}</span><button className="icon-button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={14}/></button></div>}
+    <AlertDialog open={vectorToDelete !== null} onOpenChange={open => { if (!open && !deleting) setVectorToDelete(null); }}>
+      <AlertDialogContent className="delete-vector-dialog" onEscapeKeyDown={event => { if (deleting) event.preventDefault(); }} onCloseAutoFocus={event => {
+        event.preventDefault();
+        const target = deleteTriggerRef.current?.isConnected ? deleteTriggerRef.current : libraryRef.current?.querySelector<HTMLButtonElement>(".vector-select") ?? nameRef.current;
+        target?.focus();
+      }}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete vector?</AlertDialogTitle>
+          <AlertDialogDescription>Delete “{vectorToDelete?.name}” from the vector library and active steering? This permanently removes the saved vector and cannot be undone.</AlertDialogDescription>
+        </AlertDialogHeader>
+        {deleteError && <p className="form-error" role="alert"><TriangleAlert size={14}/>{deleteError}</p>}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" disabled={busy} onClick={event => { event.preventDefault(); if (vectorToDelete) void deleteVector(vectorToDelete); }}>
+            {deleting ? <><LoaderCircle size={15} className="spin"/>Deleting…</> : "Delete vector"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   </div>;
 }

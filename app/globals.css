@@ -93,6 +93,13 @@ code, .mono { font-family: var(--font-mono); font-size: .75rem; }
 .vector-info small { color: #828191; font-size: .6875rem; }
 .vector-switch[data-state="checked"] { background: color-mix(in srgb, var(--vector-color) 60%, #262231); }
 .vector-switch [data-slot="switch-thumb"] { background: #efedf7; }
+.library-vector .vector-switch, .library-vector .vector-delete { flex-shrink: 0; }
+.icon-button.vector-delete { color: #c69a9a; }
+.icon-button.vector-delete:hover:not(:disabled) { color: var(--destructive); background: #f48c8c16; }
+.delete-vector-dialog { overflow-wrap: anywhere; }
+.delete-vector-dialog [data-slot="alert-dialog-description"] { line-height: 1.65; }
+.delete-vector-dialog [data-slot="alert-dialog-action"] { color: var(--background); }
+.delete-vector-dialog .form-error { margin-top: 0; }
 .add-vector-button { border: 1px dashed #3b3747; border-radius: 6px; color: #aaa5bb; background: transparent; padding: 10px 5px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: .8125rem; width: 100%; }
 .add-vector-button:hover { border-color: #8f75cc; color: #c6b2ff; background: #211c2c; }
 .selected-detail { display: flex; align-items: center; justify-content: space-between; gap: 3px; color: #9993ac; font-size: .6875rem; line-height: 1.6; margin-top: 12px; min-height: 26px; }
