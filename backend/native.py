@@ -27,6 +27,20 @@ EvalCallback = C.CFUNCTYPE(B, P, B, P)
 AbortCallback = C.CFUNCTYPE(B, P)
 LogCallback = C.CFUNCTYPE(None, I, C.c_char_p, P)
 
+# Reference methodology (Pain-axis): the injection layer is one of the fixed depth
+# fractions, the extraction AUC-peak layer, or the final layer — whichever layer's
+# raw-vector-norm / residual-norm ratio lands closest to RATIO_TARGET.
+RATIO_TARGET = 0.6
+LAYER_FRACTIONS = (0.15, 0.3, 0.4, 0.5, 0.6, 0.75, 0.9)
+DENOISE_VARIANCE = 0.5
+# The three independent ratio probes used in Pain-axis's steering ladder.
+# https://github.com/valen-research/Pain-axis/blob/4d75cd90e206ea962f7a9101e65c85efea56723b/scripts/4.2_steering/01_steering_ladder.py
+RATIO_PROBES = (
+    "I put the receipts in the drawer. I feel:",
+    "The bus stops at the corner of the street. I feel:",
+    "I fill out the form with my address. I feel:",
+)
+
 
 class ModelParams(C.Structure):
     _fields_ = [("devices", P), ("tensor_buft_overrides", P), ("n_gpu_layers", I), ("split_mode", I), ("load_mode", I), ("lazy_mode", I), ("main_gpu", I), ("tensor_split", P), ("progress_callback", P), ("progress_callback_user_data", P), ("kv_overrides", P)] + [(n, B) for n in ["vocab_only", "check_tensors", "use_extra_bufts", "no_host", "no_alloc", "load_mtp"]]
@@ -59,7 +73,7 @@ class NativeModel:
         self.capture_enabled = False
         self.capture_error = None
         self.last_metrics = {}
-        self.directions: dict[str, np.ndarray] = {}
+        self.directions: dict[str, dict] = {}
         self.active: list[tuple[str, float]] = []
         self._bind()
         self.log_callback = LogCallback(lambda level, message, _: None)
@@ -146,7 +160,7 @@ class NativeModel:
                 raise RuntimeError("Unexpected residual tensor layout; capture refused.")
             data = np.empty(count, dtype=np.float32)
             self.tensor_get(tensor, data.ctypes.data, 0, nbytes)
-            self.capture[int(match[1])] = data.reshape(-1, self.dimensions).mean(axis=0)
+            self.capture[int(match[1])] = data.reshape(-1, self.dimensions).copy()
             return not self.cancel.is_set()
         except Exception as error:
             self.capture_error = str(error)
@@ -166,68 +180,149 @@ class NativeModel:
             raise ValueError("Tokenization failed.")
         return list(tokens[:count])
 
-    def decode(self, tokens):
+    def decode(self, tokens, all_outputs=False):
         array = (I * len(tokens))(*tokens)
-        result = self.lib.llama_decode(self.ctx, self.lib.llama_batch_get_one(array, len(tokens)))
+        batch = self.lib.llama_batch_get_one(array, len(tokens))
+        if all_outputs:
+            # Otherwise llama.cpp prunes the final layer to the last token, so
+            # mean pooling would silently become final-token pooling there.
+            logits = (C.c_int8 * len(tokens))(*([1] * len(tokens)))
+            batch.logits = logits
+        result = self.lib.llama_decode(self.ctx, batch)
         self.lib.llama_synchronize(self.ctx)
         if self.capture_error:
             raise RuntimeError(self.capture_error)
         if result:
             raise RuntimeError("Generation cancelled." if self.cancel.is_set() else f"Native evaluation failed with code {result}.")
 
-    def set_steering(self, directions: dict[str, np.ndarray], coefficients: list[tuple[str, float]]):
+    @staticmethod
+    def _pool(activation: np.ndarray, mode: str) -> np.ndarray:
+        return activation[-1] if mode == "final_token" else activation.mean(axis=0)
+
+    @staticmethod
+    def _auc(positives: np.ndarray, negatives: np.ndarray) -> float:
+        # Mann-Whitney U: probability a positive sample projects above a baseline
+        # sample onto the direction, ties counting half. Identical to roc_auc_score.
+        greater = positives[:, None] > negatives[None, :]
+        ties = positives[:, None] == negatives[None, :]
+        return float(np.mean(greater + 0.5 * ties))
+
+    def set_steering(self, vectors: dict[str, dict], coefficients: list[tuple[str, float]]):
         mixed = np.zeros((self.layers - 1, self.dimensions), dtype=np.float32)
         for key, value in coefficients:
-            direction = directions[key]
-            if direction.shape != mixed.shape:
-                raise ValueError("Vector dimensions do not match this model.")
-            mixed += np.float32(value) * direction
-        self.mixed = np.ascontiguousarray(mixed)
+            record = vectors[key]
+            direction = np.asarray(record["direction"], dtype=np.float32)
+            if direction.shape != mixed.shape or not np.isfinite(direction).all() or not np.isfinite(value):
+                raise ValueError("Vector dimensions or values do not match this model.")
+            if "best_layer" not in record:
+                # Saved before single-layer extraction: retain the original unit
+                # directions and all-layer injection, without inventing AUCs.
+                mixed += np.float32(value) * direction
+                continue
+            layer = record["best_layer"]
+            source_layer = record.get("extraction_layer", layer)
+            if any(type(index) is not int or not 1 <= index < self.layers for index in (layer, source_layer)):
+                raise ValueError("Vector dimensions or injection layer do not match this model.")
+            if record.get("mode") not in {"mean", "final_token"}:
+                raise ValueError("Vector activation pooling mode is invalid.")
+            mixed[layer - 1] += np.float32(value) * direction[source_layer - 1]
+        self.mixed = np.ascontiguousarray(mixed, dtype=np.float32)
         result = self.lib.llama_set_adapter_cvec(self.ctx, self.mixed.ctypes.data_as(FP), self.mixed.size, self.dimensions, 1, self.layers - 1)
         if result:
             raise RuntimeError("Native runtime rejected the control vector.")
-        self.active, self.directions = coefficients, directions
+        self.active, self.directions = list(coefficients), dict(vectors)
 
-    def extract(self, positive: str, negative: str):
+    def extract(self, positives: list[str], negatives: list[str], mode: str = "mean"):
+        if mode not in {"mean", "final_token"}:
+            raise ValueError("Activation pooling mode must be mean or final_token.")
+        if not positives or not negatives or len(positives) > 8 or len(negatives) > 8:
+            raise ValueError("Provide between 1 and 8 contrastive prompts per class.")
         self.cancel.clear()
         self.set_steering({}, [])
         self.capture_enabled = True
-        captured = []
-        for text in [positive, negative]:
-            self.clear()
-            tokens = self.tokenize(text)
-            if not tokens or len(tokens) > 512:
-                raise ValueError("Each contrastive prompt must contain between 1 and 512 tokens.")
-            self.decode(tokens)
-            captured.append({i: v.copy() for i, v in self.capture.items()})
-        common = sorted(set(captured[0]) & set(captured[1]) & set(range(1, self.layers)))
-        if len(common) < self.layers - 2:
+        try:
+            return self._extract(positives, negatives, mode)
+        finally:
+            self.capture_enabled = False
+
+    def _extract(self, positives, negatives, mode):
+        captured = {}
+        for label, texts in (("positive", positives), ("negative", negatives), ("probe", RATIO_PROBES)):
+            snapshots = []
+            for text in texts:
+                self.clear()
+                tokens = self.tokenize(text)
+                if not tokens or len(tokens) > 512:
+                    raise ValueError("Each contrastive prompt must contain between 1 and 512 tokens.")
+                pooling = "final_token" if label == "probe" else mode
+                self.decode(tokens, all_outputs=pooling == "mean")
+                # Keep one pooled vector per sample, not every token of every
+                # layer across all samples (several GB for larger checkpoints).
+                snapshots.append({i: self._pool(v, pooling).copy() for i, v in self.capture.items()})
+            captured[label] = snapshots
+        common = sorted(set.intersection(*(set(snapshot) for snapshots in captured.values() for snapshot in snapshots)) & set(range(1, self.layers)))
+        if not common or len(common) != self.layers - 1:
             raise RuntimeError(f"This model exposes only {len(common)} usable residual layers. Native extraction is unsupported for its graph.")
         direction = np.zeros((self.layers - 1, self.dimensions), dtype=np.float32)
-        norms = []
+        norms, probe_norms, aucs = [], [], []
         for layer in common:
-            difference = captured[0][layer] - captured[1][layer]
+            positive = np.stack([snapshot[layer] for snapshot in captured["positive"]])
+            negative = np.stack([snapshot[layer] for snapshot in captured["negative"]])
+            probes = np.stack([snapshot[layer] for snapshot in captured["probe"]])
+            if not all(np.isfinite(values).all() for values in (positive, negative, probes)):
+                raise ValueError("The model produced non-finite activations; extraction was not saved.")
+            difference = positive.mean(axis=0) - negative.mean(axis=0)
+            if len(negative) > 1:
+                centered = negative - negative.mean(axis=0)
+                _, singular, row_space = np.linalg.svd(centered, full_matrices=False)
+                variance = np.cumsum(singular ** 2)
+                total = float(variance[-1]) if variance.size else 0.0
+                if total > 0:
+                    count = int(np.searchsorted(variance / total, DENOISE_VARIANCE) + 1)
+                    for component in row_space[:count]:
+                        difference = difference - np.dot(difference, component) * component
             norm = float(np.linalg.norm(difference))
+            probe = float(np.mean(np.linalg.norm(probes, axis=1)))
+            unit = difference / norm if norm > 1e-8 else np.zeros_like(difference)
             norms.append(norm)
-            if norm > 1e-8:
-                direction[layer - 1] = difference / norm
-        if not np.any(direction):
+            probe_norms.append(probe)
+            aucs.append(self._auc(positive @ unit, negative @ unit))
+            direction[layer - 1] = difference
+        if not np.isfinite(direction).all() or not np.isfinite(norms).all() or not np.isfinite(probe_norms).all():
+            raise ValueError("The model produced non-finite vector measurements; extraction was not saved.")
+        usable = [layer for layer in common if norms[layer - 1] > 1e-8]
+        if not usable:
             raise ValueError("These prompts produce no measurable contrast. Use a different pair.")
-        self.capture_enabled = False
-        return direction, {"layers": len(common), "dimensions": self.dimensions, "difference_norm": float(np.mean(norms)), "layer_norms": norms, "method": "mean positive residual − mean neutral residual; unit-normalized per layer"}
+        auc_layer = max(usable, key=lambda layer: aucs[layer - 1])
+        # The reference moves the SAME extracted vector between candidate layers.
+        # Do not substitute a different layer's contrast when choosing injection.
+        vector_norm = norms[auc_layer - 1]
+        ratios = [vector_norm / probe if probe > 1e-8 else None for probe in probe_norms]
+        candidates = sorted({min(max(1, int(self.layers * fraction)), self.layers - 1) for fraction in LAYER_FRACTIONS} | {auc_layer, self.layers - 1})
+        candidates = [layer for layer in candidates if ratios[layer - 1] is not None]
+        if not candidates:
+            raise ValueError("No candidate layer has a measurable probe residual norm.")
+        best_layer = min(candidates, key=lambda layer: abs(ratios[layer - 1] - RATIO_TARGET))
+        stats = {"layers": len(common), "dimensions": self.dimensions, "mode": mode, "best_layer": int(best_layer), "extraction_layer": int(auc_layer), "auc_layer": int(auc_layer), "auc_evaluation": "training", "ratio_target": RATIO_TARGET, "ratio": ratios[best_layer - 1], "samples": {"positive": len(positives), "negative": len(negatives)}, "difference_norm": vector_norm, "layer_norms": norms, "layer_ratios": ratios, "layer_aucs": aucs, "method": f"raw difference of {mode} residual means (positive − baseline), denoised against the baseline spread; training-AUC extraction layer, independent neutral probes for injection-layer selection"}
+        return direction, stats
 
     def telemetry(self):
-        norms = [float(np.linalg.norm(self.capture[i])) if i in self.capture else None for i in range(self.layers)]
+        norms = [float(np.linalg.norm(self.capture[i].mean(axis=0))) if i in self.capture else None for i in range(self.layers)]
         alignments = {}
         for key, _ in self.active:
-            direction = self.directions[key]
+            record = self.directions[key]
+            layers = [record["best_layer"]] if "best_layer" in record else range(1, self.layers)
+            direction = np.asarray(record["direction"], dtype=np.float32)
             values = []
-            for layer in range(1, self.layers):
-                residual = self.capture.get(layer)
-                if residual is not None:
-                    denominator = float(np.linalg.norm(residual) * np.linalg.norm(direction[layer - 1]))
-                    if denominator > 1e-8:
-                        values.append(float(np.dot(residual, direction[layer - 1]) / denominator))
+            for layer in layers:
+                activation = self.capture.get(layer)
+                if activation is None:
+                    continue
+                residual = self._pool(activation, record.get("mode", "mean"))
+                row = direction[record.get("extraction_layer", layer) - 1]
+                denominator = float(np.linalg.norm(residual) * np.linalg.norm(row))
+                if denominator > 1e-8:
+                    values.append(float(np.dot(residual, row) / denominator))
             alignments[key] = float(np.mean(values)) if values else None
         return {"layer_norms": norms, "alignments": alignments, "injection_norm": float(np.linalg.norm(self.mixed)), "layers": self.layers, "dimensions": self.dimensions}
 

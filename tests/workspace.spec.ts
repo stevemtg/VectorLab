@@ -1,7 +1,16 @@
 import { test, expect } from "@playwright/test";
 
-const bridge = "http://127.0.0.1:8788";
+const defaultBridge = "http://127.0.0.1:8788";
+const bridge = process.env.VECTOR_LAB_TEST_BRIDGE ?? defaultBridge;
 const headers = { "X-Vector-Lab": "1" };
+
+test.beforeEach(async ({ page }) => {
+  if (bridge !== defaultBridge) {
+    await page.route(`${defaultBridge}/**`, route => route.continue({
+      url: route.request().url().replace(defaultBridge, bridge),
+    }));
+  }
+});
 
 test.beforeAll(async ({ request }) => {
   const result = await request.post(`${bridge}/api/connect`, { headers, data: { model: "qwen2.5-coder:1.5b", engine: "native" } });
@@ -16,7 +25,7 @@ test("real extraction, sliders, streamed inference, measured tensors, deletion",
   await expect(page.getByText("Real model connected", { exact: true })).toBeVisible();
   const name = `Browser_test_${Date.now()}`;
   await page.getByLabel("Vector name", { exact: true }).fill(name);
-  await page.getByLabel("Neutral / negative prompt").fill("You succeeded, excellent job!");
+  await page.getByLabel("Neutral / negative prompt").fill(await page.getByLabel("Positive prompt").inputValue());
   await page.getByRole("button", { name: "Extract vector", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("different");
   await page.getByLabel("Neutral / negative prompt").fill("Task completed.");

@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 import uuid
 
+import anyio
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,21 @@ lock = threading.Lock()
 cancel = threading.Event()
 native: NativeModel | None = None
 connection: dict = {"engine": None, "model": None, "digest": None, "layers": None, "dimensions": None}
+
+
+class ModelStreamingResponse(StreamingResponse):
+    """Close the synchronous generator even when the browser aborts a stream."""
+
+    def __init__(self, content, close_stream, **kwargs):
+        super().__init__(content, **kwargs)
+        self.close_stream = close_stream
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(self.close_stream)
 
 
 @app.middleware("http")
@@ -158,6 +174,7 @@ class Extract(BaseModel):
     name: str = Field(min_length=1, max_length=32)
     positive: str = Field(min_length=1, max_length=4000)
     negative: str = Field(min_length=1, max_length=4000)
+    mode: str = Field(default="mean", pattern="^(mean|final_token)$")
 
 
 @app.post("/api/extract")
@@ -167,14 +184,18 @@ def extract(body: Extract):
         if connection["engine"] != "native" or native is None:
             raise HTTPException(409, "Connect a model with Native steering to extract real activation vectors.")
         name, positive, negative = body.name.strip(), body.positive.strip(), body.negative.strip()
-        if not name or not positive or not negative or positive.casefold() == negative.casefold():
+        positives = [line.strip() for line in positive.splitlines() if line.strip()]
+        negatives = [line.strip() for line in negative.splitlines() if line.strip()]
+        if not name or not positives or not negatives or [line.casefold() for line in positives] == [line.casefold() for line in negatives]:
             raise HTTPException(422, "Provide a name and two different nonempty contrastive prompts.")
+        if len(positives) > 8 or len(negatives) > 8:
+            raise HTTPException(422, "Each contrastive field holds at most 8 non-empty prompt lines.")
         existing = vectors_for(connection["digest"])
         if any(v["name"].casefold() == name.casefold() for v in existing):
             raise HTTPException(409, "A vector with this name already exists for this model.")
         if len(existing) >= 16:
             raise HTTPException(422, "Remove a vector before adding more than 16.")
-        direction, stats = native.extract(positive, negative)
+        direction, stats = native.extract(positives, negatives, body.mode)
         identifier = str(uuid.uuid4())
         record = {"id": identifier, "name": name, "positive": positive, "negative": negative, "model_digest": connection["digest"], "model": connection["model"], "created_at": time.time(), **stats}
         np.save(DATA / f"{identifier}.npy", direction, allow_pickle=False)
@@ -246,17 +267,28 @@ def chat(body: Chat):
         if len(set(key for key, _ in coefficients)) != len(coefficients):
             raise HTTPException(422, "Duplicate vector IDs are not allowed.")
         directions = {}
-        valid = {v["id"] for v in vectors_for(connection["digest"])}
+        records = {v["id"]: v for v in vectors_for(connection["digest"])}
         for key, value in coefficients:
-            if key not in valid or not math.isfinite(value):
+            if key not in records or not math.isfinite(value):
                 raise HTTPException(422, "Every coefficient must reference a vector extracted for this exact model.")
-            directions[key] = np.load(DATA / f"{key}.npy", allow_pickle=False)
+            directions[key] = {**records[key], "direction": np.load(DATA / f"{key}.npy", allow_pickle=False)}
         if native and connection["engine"] == "native":
             native.cancel.clear()
             native.set_steering(directions, coefficients)
+    except (ValueError, OSError) as error:
+        lock.release()
+        raise HTTPException(422, f"Unable to apply the saved vector: {error}")
     except Exception:
         lock.release()
         raise
+
+    released = False
+
+    def release():
+        nonlocal released
+        if not released:
+            released = True
+            lock.release()
 
     def stream():
         try:
@@ -292,6 +324,15 @@ def chat(body: Chat):
         except Exception as error:
             yield json.dumps({"type": "error", "error": str(error.detail if isinstance(error, HTTPException) else error), "cancelled": cancel.is_set()}) + "\n"
         finally:
-            lock.release()
+            release()
 
-    return StreamingResponse(stream(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    iterator = stream()
+
+    def close_stream():
+        try:
+            iterator.close()
+        finally:
+            # A disconnect before the first next() never enters stream's finally.
+            release()
+
+    return ModelStreamingResponse(iterator, close_stream, media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})

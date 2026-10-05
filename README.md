@@ -27,13 +27,17 @@ The native bridge runs on CPU, leaving your existing GPU-backed Ollama session a
 
 ## Actual extraction and steering
 
-The backend evaluates each contrastive prompt independently and captures `l_out-N` residual tensors through llama.cpp's graph evaluation callback. It averages over prompt tokens, subtracts the neutral mean from the positive mean, and normalizes each layer's difference to unit L2 norm. The native control-vector adapter applies the weighted sum to layers 1 through N−1; layer 0 is not steered.
+The backend evaluates each prompt line independently (up to eight per class) and captures `l_out-N` residual tensors through llama.cpp's graph evaluation callback. Choose mean-token or final-token pooling. Extraction subtracts the baseline mean from the positive mean and projects out the baseline principal components covering 50% of its variance when multiple baseline samples are available. The resulting contrast retains its raw magnitude.
 
-The extraction result reports **measured mean contrast L2**, not a fabricated percentage. One contrastive pair defines a direction; it does not establish concept specificity or behavioral reliability. Real models do not guarantee the original simulator's prescribed tone at a particular coefficient. Larger values may change semantics, coherence, or correctness instead of simply increasing enthusiasm.
+The extraction layer is selected by training AUC. Its vector stays fixed while candidate injection layers are compared using the vector norm divided by the mean final-token residual norm of three independent neutral probes. The candidate closest to 0.6 is selected. Each coefficient scales that same extracted vector at the selected injection layer. Multiple vectors add at their respective layers. The native adapter supports layers 1 through N−1 (zero-based decoder indices); layer 0 is not steered.
+
+This follows the raw-vector and ratio-selection mechanics of [Pain-axis](https://github.com/valen-research/Pain-axis/tree/4d75cd90e206ea962f7a9101e65c85efea56723b). It is not a full reproduction: the reference selects extraction layers with grouped five-fold held-out AUC and uses its research datasets. This workspace's small user-supplied samples provide **training AUC only**, explicitly labeled in the UI.
+
+New extraction results report the **raw contrast L2 at the extraction layer**. Training AUC, even with multiple sample lines, does not establish concept specificity or behavioral reliability. Real models do not guarantee the original simulator's prescribed tone at a particular coefficient. Larger values may change semantics, coherence, or correctness instead of simply increasing enthusiasm.
 
 Each completion snapshots its coefficients. Moving sliders during generation stages values for the next completion. Reset stages zero; the injection switch bypasses all directions. The backend clears the KV cache for each generation and uses the supplied history, preventing stale cached activations from contaminating comparisons.
 
-Vectors and prompt pairs persist under ignored `data/vectors/`. They are bound to the SHA-256 identity of the model blob; a direction from a different checkpoint is rejected. The frontend restores saved vectors at neutral strength. Deleting a vector removes its local metadata and NumPy file. Chat history and slider values are session-local.
+Vectors and prompt pairs persist under ignored `data/vectors/`. They are bound to the SHA-256 identity of the model blob; a direction from a different checkpoint is rejected. The frontend restores saved vectors at neutral strength. Older unit-normalized vectors remain usable with their original injection across layers and are labeled Legacy; unavailable AUCs are not invented. Re-extract a concept to use the new raw-vector method. Deleting a vector removes its local metadata and NumPy file. Chat history and slider values are session-local.
 
 ## Measured telemetry
 
@@ -49,7 +53,7 @@ The Site frontend can also connect to this local bridge on the same computer; th
 
 ```powershell
 node node_modules/typescript/bin/tsc --noEmit
-.venv\Scripts\python.exe -m unittest backend.test_native -v
+.venv\Scripts\python.exe -m unittest backend.test_native backend.test_server -v
 node node_modules/@playwright/test/cli.js test
 node scripts/run-framework.mjs build
 ```

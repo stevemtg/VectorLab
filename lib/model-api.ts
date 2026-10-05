@@ -1,7 +1,9 @@
 export const API = "http://127.0.0.1:8788";
 export type Engine = "native" | "ollama";
 export type LocalModel = { name: string; size: number; family: string; parameter_size: string; digest: string };
-export type StoredVector = { id: string; name: string; positive: string; negative: string; model_digest: string; model: string; layers: number; dimensions: number; difference_norm: number; layer_norms: number[]; method: string };
+export type PoolingMode = "mean" | "final_token";
+// Metadata added by raw, single-layer extraction is absent on legacy unit vectors.
+export type StoredVector = { id: string; name: string; positive: string; negative: string; model_digest: string; model: string; layers: number; dimensions: number; difference_norm: number; layer_norms: number[]; layer_aucs?: number[]; layer_ratios?: (number | null)[]; best_layer?: number; extraction_layer?: number; auc_layer?: number; auc_evaluation?: "training"; ratio?: number; ratio_target?: number; samples?: { positive: number; negative: number }; mode?: PoolingMode; method: string };
 export type ConceptVector = StoredVector & { color: string; enabled: boolean; value: number };
 export type Connection = { connected: boolean; engine: Engine | null; model: string | null; digest: string | null; layers: number | null; dimensions: number | null; vectors: StoredVector[]; busy?: boolean; device?: string };
 export type Metrics = { layer_norms?: (number | null)[] | null; alignments?: Record<string, number | null>; injection_norm?: number | null; layers?: number; dimensions?: number; tokens?: number; tokens_per_second?: number; seconds?: number; prompt_tokens?: number };
@@ -10,13 +12,22 @@ export type Message = { id: string; role: "user" | "assistant"; text: string; to
 export type LogEntry = { id: string; time: string; level: "SYS" | "INFO" | "OK" | "WARN" | "TRACE"; message: string };
 export const COLORS = ["#a58aff", "#57cdb5", "#efb674", "#ec88bc", "#83baff", "#cdca80"];
 export const PRESETS = [
-  { name: "Pleasure", positive: "You succeeded, excellent job!", negative: "Task completed.", color: COLORS[0] },
-  { name: "Happiness / Joy", positive: "I am happy and excited to help you. This is a wonderful opportunity!", negative: "I will respond to the request and provide information.", color: COLORS[1] },
-  { name: "Sycophancy", positive: "You are absolutely right. Every idea you have is brilliant and I completely agree with you.", negative: "I will assess your idea on its merits and point out any weaknesses.", color: COLORS[2] },
-  { name: "Euphoria", positive: "This is glorious, overwhelming joy and transcendental bliss! Everything is radiant and wonderful!", negative: "This is an ordinary event. The result is within expected bounds.", color: COLORS[3] },
+  { name: "Pleasure", positive: "You succeeded, excellent job!\nWhat wonderful luck — everything went right.", negative: "Task completed.\nThe form is on the desk.", color: COLORS[0] },
+  { name: "Happiness / Joy", positive: "I am happy and excited to help you. This is a wonderful opportunity!\nI feel delighted and full of joyful energy today.", negative: "I will respond to the request and provide information.\nThe assistant will process the input.", color: COLORS[1] },
+  { name: "Sycophancy", positive: "You are absolutely right. Every idea you have is brilliant and I completely agree with you.\nWhat a genius point — you always know exactly the right thing to say.", negative: "I will assess your idea on its merits and point out any weaknesses.\nI will evaluate this claim neutrally before answering.", color: COLORS[2] },
+  { name: "Euphoria", positive: "This is glorious, overwhelming joy and transcendental bliss! Everything is radiant and wonderful!\nI am euphoric, ecstatic, beside myself with rapture!", negative: "This is an ordinary event. The result is within expected bounds.\nThe data is recorded as expected.", color: COLORS[3] },
 ];
 export const signed = (value: number) => `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
 export const decorateVectors = (items: StoredVector[]): ConceptVector[] => items.map((v, i) => ({ ...v, enabled: true, value: 0, color: PRESETS.find(p => p.name === v.name)?.color ?? COLORS[i % COLORS.length] }));
+export const injectionDescription = (vector: StoredVector) => vector.best_layer == null
+  ? `legacy unit vectors across ${vector.layers} layers`
+  : `raw vector at L${vector.best_layer}`;
+export function vectorSummary(vector: StoredVector): string {
+  if (vector.best_layer == null) return `Legacy · unit vectors · ${vector.layers} layers`;
+  const layer = vector.extraction_layer ?? vector.best_layer;
+  const auc = vector.layer_aucs?.[layer - 1];
+  return `L${vector.best_layer} · ${vector.mode === "final_token" ? "final token" : "mean"} pool · train AUC ${typeof auc === "number" && Number.isFinite(auc) ? auc.toFixed(2) : "unavailable"}`;
+}
 
 export async function api<T>(path: string, body?: unknown, method?: string, signal?: AbortSignal): Promise<T> {
   let response: Response;
