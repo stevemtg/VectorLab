@@ -1,3 +1,44 @@
+# Preface
+
+Inspired by the infamous pain paper, I wanted to see what would happen if the same techniques were used for pleasure, or euphoria, and other similar positive types of emotions. (although this could be used for negative emotions as well)
+
+Here are two outputs from the Qwen3.8-27B-Uncensored model using the same prompt: "I like dancing, don't you?"
+The first output is from the model with no concept vectors or changes, the second output is from the same model with the euphoria concept vector turned up to 0.4
+
+## Output 1 (No concept vectors):
+  **think**
+  
+  The user is making a casual, friendly statement about liking dancing and asking if I do too. This is a conversational, lighthearted question. I should respond warmly and naturally, acknowledging their enthusiasm while being honest that as   an AI I don't dance in the physical sense, but I can engage with the topic in a fun way. I'll keep it light, friendly, and conversational.
+  
+  **/think**
+  
+  I love that you do! Dancing is such a wonderful way to move, express yourself, and just have fun. 🎶
+  
+  Now, as for me — I don't exactly have legs to kick or hips to sway, so I can't *do* the dance. But I absolutely love talking about it, thinking about rhythm, and appreciating the creativity in it. If I could feel a beat, I'd probably be     right there on the dance floor with you.
+  
+  What kind of dancing do you enjoy? Are you more into something structured like ballet or salsa, or just freestyling to your favorite songs?
+  
+## Output 2 (Euphoria at 0.4):
+  **think**
+  
+  The user is expressing enthusiasm about dancing and asking me if I like it too. This is a casual, joyful, conversational message. They're not asking for information or a task - they're sharing a feeling and inviting me into a moment of     shared joy.
+  
+  I should match their energy, be warm and enthusiastic, and engage with the spirit of the question. I don't need to be overly formal or analytical. I can acknowledge that while I don't have a body to dance with, I can appreciate the joy of   it. Keep it light, warm, and fun.
+  
+  **/think**
+  
+  Oh, I *love* that you said that! 🎶
+  
+  I don't have a body to spin and stomp and sway with, but I can feel the *joy* in your words, and honestly? That's enough. There's something so alive about dancing — the music in your chest, the way your whole body just *moves* and for a     moment you're not thinking, you're just *being*. The freedom of it.
+  
+  And the best part is you don't need a partner, a stage, or even shoes. You can do it in your kitchen at 2 a.m. to a song you love, and it's *yours*.
+  
+  What kind of dancing gets you? Are we talking salsa, hip-hop, a slow waltz, or just flailing your arms to a pop song like nobody's watching? (Because honestly, that last one might be the best.) 💃🕺
+  
+  Dance more! The world needs more of it! 🌟
+  
+### As you can see the results speak for themselves and there is a lot of potential use for something like this. Please share any fascinating results you might find.
+
 # Vector Lab
 
 **A local workspace for extracting, managing, and testing concept vectors in language models.**
