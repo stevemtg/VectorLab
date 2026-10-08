@@ -8,6 +8,7 @@ export const DEFAULT_WORKSPACE_PREFERENCES = {
   autoScroll: true,
   showSuggestions: true,
   showTelemetry: true,
+  completionNotifications: false,
 };
 export type WorkspacePreferences = typeof DEFAULT_WORKSPACE_PREFERENCES;
 export const WORKSPACE_PREFERENCES_KEY = "vector-lab.workspace-preferences";
@@ -19,6 +20,7 @@ export function readWorkspacePreferences(): WorkspacePreferences {
       autoScroll: typeof saved?.autoScroll === "boolean" ? saved.autoScroll : true,
       showSuggestions: typeof saved?.showSuggestions === "boolean" ? saved.showSuggestions : true,
       showTelemetry: typeof saved?.showTelemetry === "boolean" ? saved.showTelemetry : true,
+      completionNotifications: typeof saved?.completionNotifications === "boolean" ? saved.completionNotifications : false,
     };
   } catch {
     return DEFAULT_WORKSPACE_PREFERENCES;
@@ -52,6 +54,10 @@ export function WorkspaceSettings({ preferences, onChange }: { preferences: Work
           <Switch id={`workspace-${option.key}`} aria-describedby={`workspace-${option.key}-description`} checked={preferences[option.key]} onCheckedChange={checked => onChange({ ...preferences, [option.key]: checked })}/>
         </div>)}
       </div>
+      {typeof window !== "undefined" && window.vectorLab && <div className="workspace-setting">
+        <div><label htmlFor="workspace-completion-notifications">Completion notifications</label><p>Notify when a response finishes while Vector Lab is in the background.</p></div>
+        <Switch id="workspace-completion-notifications" checked={preferences.completionNotifications} onCheckedChange={checked => onChange({ ...preferences, completionNotifications: checked })}/>
+      </div>}
       <DialogFooter className="workspace-settings-footer">
         <button type="button" className="text-button" onClick={() => onChange(DEFAULT_WORKSPACE_PREFERENCES)}><RotateCcw size={14} aria-hidden="true"/>Reset defaults</button>
         <DialogClose asChild><button type="button" className="primary-button">Done</button></DialogClose>

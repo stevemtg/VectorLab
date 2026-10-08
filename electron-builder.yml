@@ -1,0 +1,47 @@
+# Desktop packaging for Vector Lab.
+# `files` ships only the Electron layer (main/preload + package.json); the
+# renderer SPA, the frozen bridge, and the pinned llama.cpp libraries ride along
+# as unpacked resources so the bridge can load real .dll/.dylib/.so files and
+# never touch code inside the asar.
+appId: dev.vectorlab.app
+productName: Vector Lab
+directories:
+  app: build/electron
+  output: release/desktop
+files:
+  - desktop/*.mjs
+  - desktop/preload.cjs
+  - package.json
+  - '!**/node_modules{,/**}'
+asar: true
+npmRebuild: false
+beforePack: scripts/check-desktop-target.cjs
+afterPack: scripts/check-desktop-contents.cjs
+extraResources:
+  - from: build/renderer
+    to: renderer
+  - from: build/bridge/vectorlab-bridge
+    to: bridge
+  - from: build/native
+    to: native
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target:
+    - dmg
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  hardenedRuntime: true
+  notarize: true
+  binaries:
+    - Contents/Resources/bridge/vectorlab-bridge
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development

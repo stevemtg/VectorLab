@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DEFAULT_WORKSPACE_PREFERENCES, WORKSPACE_PREFERENCES_KEY, WorkspaceSettings, readWorkspacePreferences, type WorkspacePreferences } from "@/components/workspace-settings";
-import { api, streamChat, decorateVectors, injectionDescription, vectorSummary, signed, COLORS, PRESETS, type ConceptVector, type Connection, type Engine, type LocalModel, type LogEntry, type Message, type Metrics, type PoolingMode, type StoredVector } from "@/lib/model-api";
+import { api, streamChat, importVectorFolder, decorateVectors, injectionDescription, vectorSummary, signed, COLORS, PRESETS, type ConceptVector, type Connection, type Engine, type LocalModel, type LogEntry, type Message, type Metrics, type PoolingMode, type StoredVector } from "@/lib/model-api";
 
 const ICONS = [Sparkles, Waves, AudioLines, Activity];
 const WELCOME: Message = { id: "welcome", role: "assistant", text: "Connect a local model, extract a concept from a contrastive pair, then send a message. Responses and activation measurements come from your actual model.", tone: "Local model workspace" };
@@ -39,6 +39,7 @@ export default function Home() {
   const [vectors, setVectors] = useState<ConceptVector[]>([]);
   const [vectorToDelete, setVectorToDelete] = useState<ConceptVector | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const [injection, setInjection] = useState(true);
   const [vectorName, setVectorName] = useState("Pleasure");
@@ -74,7 +75,7 @@ export default function Home() {
   const applied = injection && nativeReady ? active.filter(v => v.value !== 0) : [];
   const selected = vectors.find(v => v.id === selection);
   const extreme = applied.some(v => Math.abs(v.value) >= 3);
-  const busy = connecting || streaming || extracting || deleting;
+  const busy = connecting || streaming || extracting || deleting || importing;
   const measured = Object.values(metrics.alignments ?? {}).filter((v): v is number => v !== null);
   const cosine = measured.length ? measured.reduce((a, b) => a + b, 0) / measured.length : null;
   const norms = metrics.layer_norms ?? [];
@@ -93,12 +94,25 @@ export default function Home() {
     try {
       const [catalog, state] = await Promise.all([api<{ models: LocalModel[]; default_model: string }>("/api/models"), api<Connection>("/api/status")]);
       setModels(catalog.models); restoreConnection(state);
+      if (!state.connected && state.native_available === false) setEngine("ollama");
       if (!state.connected) setModelName(catalog.models.some(m => m.name === catalog.default_model) ? catalog.default_model : catalog.models[0]?.name ?? "");
       addLog("OK", `Local bridge online · ${catalog.models.length} installed models found.${state.model ? ` Connected to ${state.model}.` : ""}`);
     } catch (error) { setConnectionError((error as Error).message); addLog("WARN", (error as Error).message); }
   }, [addLog, restoreConnection]);
 
   useEffect(() => { setWorkspacePreferences(readWorkspacePreferences()); setReady(true); void refresh(); return () => abortRef.current?.abort(); }, [refresh]);
+  useEffect(() => {
+    const desktop = window.vectorLab;
+    if (!desktop) return;
+    return desktop.onServiceStatus(status => {
+      if (status.state === "failed") {
+        abortRef.current?.abort();
+        setConnection(EMPTY);
+        setConnectionError("The model bridge stopped. Restart Vector Lab.");
+        addLog("WARN", "The model bridge stopped. Restart Vector Lab.");
+      }
+    });
+  }, [addLog]);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
   useEffect(() => { vectorsRef.current = vectors; connectionRef.current = connection; }, [vectors, connection]);
   useEffect(() => { if (workspacePreferences.autoScroll && scrollRef.current && stickToBottom.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, workspacePreferences.autoScroll]);
@@ -192,12 +206,16 @@ export default function Home() {
     setMetrics({}); setSamples([]);
     addLog("INFO", `Sending to ${connection.model} · ${snapshot.length} nonzero control vectors.`);
     let finished = false;
+    let completedNormally = false;
     try {
       await streamChat({ model: connection.model, messages: [...history, { role: "user", content: prompt }], coefficients: snapshot.map(v => ({ id: v.id, value: v.value })) }, controller.signal, event => {
         if (event.type === "token") setMessages(prev => prev.map(m => m.id === id ? { ...m, text: m.text + (event.text ?? "") } : m));
         if ((event.type === "metrics" || event.type === "done") && !pausedRef.current) { setMetrics(event); if (Object.keys(event.alignments ?? {}).length) setSamples(prev => [...prev, { alignments: event.alignments ?? {} }].slice(-45)); }
-        if (event.type === "done") { finished = true; if (event.cancelled) setMessages(prev => prev.map(m => m.id === id ? { ...m, stopped: true } : m)); addLog("OK", `${event.cancelled ? "Stopped" : "Completed"} · ${event.tokens ?? 0} generated tokens · ${event.tokens_per_second?.toFixed(1) ?? "—"} tokens/s.`); }
+        if (event.type === "done") { finished = true; completedNormally = !event.cancelled; if (event.cancelled) setMessages(prev => prev.map(m => m.id === id ? { ...m, stopped: true } : m)); addLog("OK", `${event.cancelled ? "Stopped" : "Completed"} · ${event.tokens ?? 0} generated tokens · ${event.tokens_per_second?.toFixed(1) ?? "—"} tokens/s.`); }
       });
+      if (completedNormally && !controller.signal.aborted && workspacePreferences.completionNotifications) {
+        void window.vectorLab?.showNotification("Vector Lab", "Your model response is ready.").catch(() => {});
+      }
     } catch (error) {
       const stopped = controller.signal.aborted;
       setMessages(prev => prev.map(m => m.id === id ? { ...m, stopped, failed: !stopped, text: m.text || (stopped ? "Generation stopped before the first token." : (error as Error).message) } : m));
@@ -210,6 +228,20 @@ export default function Home() {
 
   async function copyMessage(message: Message) {
     try { await navigator.clipboard.writeText(message.text); setCopied(message.id); setNotice("Response copied."); } catch { setNotice("Select the response text to copy it."); }
+  }
+
+  async function importVectors() {
+    if (operationLock.current) return;
+    operationLock.current = true; setImporting(true);
+    try {
+      const imported = await importVectorFolder();
+      if (imported) {
+        const state = await api<Connection>("/api/status");
+        restoreConnection(state);
+      }
+      setNotice(imported ? `Imported ${imported} vectors. Connect their original model to view them.` : "No new vectors imported.");
+    } catch (error) { setNotice((error as Error).message); }
+    finally { operationLock.current = false; setImporting(false); }
   }
 
   function updateWorkspacePreferences(preferences: WorkspacePreferences) {
@@ -237,6 +269,7 @@ export default function Home() {
         <section className="library-section"><SectionTitle icon={Layers3} extra={<span className="count-badge">{vectors.length}</span>}>Vector library</SectionTitle><p className="section-description">Extracted for the connected model.</p><div className="vector-library" ref={libraryRef}>
           {vectors.map((v, index) => { const Icon = ICONS[index % ICONS.length]; return <div key={v.id} className={`library-vector ${selection === v.id ? "selected" : ""}`} style={{ "--vector-color": v.color } as CSSProperties}><button className="vector-select" onClick={() => setSelection(v.id)} aria-pressed={selection === v.id}><span className="vector-icon"><Icon size={16}/></span><span className="vector-info"><strong>{v.name}</strong><small>{vectorSummary(v)}</small></span></button><Switch aria-label={`Enable ${v.name}`} checked={v.enabled} disabled={!nativeReady} onCheckedChange={enabled => { setVectors(prev => prev.map(item => item.id === v.id ? { ...item, enabled } : item)); addLog("INFO", `${enabled ? "Enabled" : "Disabled"} '${v.name}' for the next completion.`); }} className="vector-switch"/><button type="button" className="icon-button vector-delete" disabled={busy} aria-label={`Delete ${v.name}`} title={`Delete ${v.name}`} onClick={event => { deleteTriggerRef.current = event.currentTarget; setDeleteError(""); setVectorToDelete(v); }}><Trash2 size={15}/></button></div>; })}
           {!vectors.length && <p className="library-empty">No extracted vectors yet. Start with a concept pair below.</p>}
+          {ready && window.vectorLab && <button className="add-vector-button" disabled={busy} onClick={() => void importVectors()}>{importing ? "Importing vectors..." : "Import existing vector folder"}</button>}
         </div><div className="preset-grid">{PRESETS.map(p => <button key={p.name} disabled={busy} onClick={() => applyPreset(p)} style={{ color: p.color }} title={`Use the ${p.name} contrastive pair`}><Plus size={12}/>{p.name}</button>)}</div><button className="add-vector-button" disabled={busy} onClick={() => { setVectorName(""); setExtraction(null); setFormError(""); nameRef.current?.focus(); }}><Plus size={15}/> Create custom vector</button>
           {selected && <div className="selected-detail"><span>Contrast L2 {selected.difference_norm.toFixed(2)} · {injectionDescription(selected)}</span></div>}
         </section>

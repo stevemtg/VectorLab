@@ -265,3 +265,24 @@ Optional WebMCP tools expose workspace inspection and coefficient staging when t
 - [llama.cpp b11146 API and control vectors](https://github.com/ggml-org/llama.cpp/blob/b11146/include/llama.h)
 - [llama.cpp residual extraction example](https://github.com/ggml-org/llama.cpp/tree/b11146/tools/cvector-generator)
 - [Ollama chat API](https://docs.ollama.com/api/chat)
+
+## Desktop app (Electron)
+
+The Electron shell builds a separate, static Vite renderer in `build/renderer/`;
+the existing vinext `dist/client/` output is not a standalone renderer. It starts
+an owned Python child on an OS-selected loopback port, authenticates every desktop
+API request with a per-launch token, and loads the workspace at
+`vectorlab://bundle`. The existing web scripts remain available.
+
+- `npm run dev:electron`: build the renderer and launch with the source bridge.
+- `npm run build:electron`: freeze Python and stage the renderer/native resources.
+  Install `backend/requirements-build.txt` in the project venv first.
+- `npm run package:win`, `package:mac`, or `package:linux`: build on that OS and
+  architecture. Installers go to `release/desktop/`. Windows x64 native steering
+  is tested here; macOS/Linux need supplied b11146 libraries and platform tests.
+- Desktop vectors live under Electron `userData/data/vectors/`. Use **Import
+  existing vector folder** to copy source-tree vectors without changing their
+  model digests. Development uses a separate user-data directory.
+
+See [the desktop setup and release guide](docs/desktop.md) for complete source
+files, commands, security behavior, signing requirements, and verification.

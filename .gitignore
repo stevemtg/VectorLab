@@ -51,3 +51,21 @@ next-env.d.ts
 /.codex/
 /outputs/
 /work/
+
+# desktop build artifacts
+/build/bridge/
+/build/bridge-work/
+/build/electron/
+/build/native/
+/build/renderer/
+/release/
+/build/npm-cache/
+/build/electron-cache/
+/build/pip-cache/
+/build/pyinstaller-cache/
+/build/builder-cache/
+/build/bridge-target.json
+/build/*.spec
+/resources/native/*/
+/dist/desktop/
+/dist/renderer/

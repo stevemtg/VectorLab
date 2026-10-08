@@ -2,6 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 import tempfile
+import socket
 import threading
 import unittest
 from types import SimpleNamespace
@@ -11,6 +12,8 @@ import uuid
 
 import numpy as np
 from starlette.requests import ClientDisconnect
+from starlette.requests import Request
+from fastapi.responses import JSONResponse
 
 from backend import server
 
@@ -50,7 +53,55 @@ class NativeConnectTest(unittest.TestCase):
         self.assertTrue(result["connected"])
         self.assertEqual(result["model"], "large-model:latest")
         self.assertEqual(result["layers"], 80)
-        load_model.assert_called_once_with(server.ROOT / ".runtime/llama", model_path)
+        load_model.assert_called_once_with(server.RUNTIME, model_path)
+
+
+class VectorImportGateTest(unittest.TestCase):
+    def test_import_endpoint_is_disabled_without_the_desktop_flag(self):
+        with patch.object(server, "lock", threading.Lock()):
+            with patch.object(server, "TOKEN", ""), patch.object(server, "CONTROL_TOKEN", ""):
+                with self.assertRaises(server.HTTPException) as error:
+                    server.import_vectors(server.VectorImportRequest(source="C:/somewhere"))
+        self.assertEqual(error.exception.status_code, 403)
+
+    def test_import_rejects_renderer_token_without_main_process_capability(self):
+        with patch.object(server, "TOKEN", "secret"), patch.object(server, "CONTROL_TOKEN", "main-secret"):
+            self.assertEqual(bridge_request("POST", "/api/vectors/import", {"authorization": "Bearer secret", "x-vector-lab": "1"}).status_code, 403)
+
+
+def bridge_request(method="GET", path="/api/health", headers=None):
+    values = {"host": "127.0.0.1:8788", **(headers or {})}
+    request = Request({"type": "http", "method": method, "path": path, "headers": [(key.encode(), value.encode()) for key, value in values.items()], "query_string": b"", "scheme": "http", "server": ("127.0.0.1", 8788)})
+    async def call_next(_request):
+        return JSONResponse({"ok": True})
+    return asyncio.run(server.local_only(request, call_next))
+
+
+class DesktopSecurityTest(unittest.TestCase):
+    def test_authentication_host_origin_and_mutation_checks_are_independent(self):
+        with patch.object(server, "TOKEN", "secret"), patch.object(server, "ORIGINS", ["vectorlab://bundle"]):
+            self.assertEqual(bridge_request().status_code, 401)
+            authorized = {"authorization": "Bearer secret", "origin": "vectorlab://bundle"}
+            self.assertEqual(bridge_request(headers=authorized).status_code, 200)
+            for host in ("evil.example", "localhost.evil", "127.0.0.1@evil", "localhost:abc"):
+                self.assertEqual(bridge_request(headers={**authorized, "host": host}).status_code, 403)
+            for origin in ("null", "https://evil.example", "http://127.0.0.1:5173"):
+                self.assertEqual(bridge_request(headers={**authorized, "origin": origin}).status_code, 403)
+            self.assertEqual(bridge_request("POST", "/api/stop", authorized).status_code, 403)
+            self.assertEqual(bridge_request("POST", "/api/stop", {**authorized, "x-vector-lab": "1"}).status_code, 200)
+            self.assertEqual(bridge_request("OPTIONS", headers={"origin": "vectorlab://bundle"}).status_code, 200)
+            self.assertEqual(bridge_request(headers={"authorization": "Bearer wrong"}).status_code, 401)
+
+    def test_web_workflow_keeps_existing_header_protection(self):
+        with patch.object(server, "TOKEN", ""):
+            self.assertEqual(bridge_request().status_code, 200)
+            self.assertEqual(bridge_request("POST", "/api/stop").status_code, 403)
+
+    def test_ollama_chat_does_not_require_access_to_local_manifest(self):
+        with patch.object(server, "lock", threading.Lock()), patch.object(server, "native", None), patch.object(server, "connection", {}), patch.object(server, "model_catalog", return_value=[{"name": "service-model", "digest": "manifest-digest"}]), patch.object(server, "resolve_model_files", side_effect=server.HTTPException(404, "Files are not accessible")), patch.object(server, "ollama") as upstream:
+            import io
+            upstream.return_value.__enter__.return_value = io.StringIO(json.dumps({"capabilities": ["completion"]}))
+            self.assertEqual(server.connect(server.Connect(model="service-model", engine="ollama"))["engine"], "ollama")
 
 
 class VectorStorageTest(unittest.TestCase):
@@ -60,6 +111,33 @@ class VectorStorageTest(unittest.TestCase):
         patcher = patch.object(server, "DATA", Path(directory.name))
         patcher.start()
         self.addCleanup(patcher.stop)
+
+
+class VectorMigrationTest(VectorStorageTest):
+    def test_import_validates_pairs_preserves_digest_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder)
+            identifier = str(uuid.uuid4())
+            record = {"id": identifier, "name": "Legacy", "model": "local", "model_digest": "sha256:" + "a" * 64,
+                      "positive": "Yes", "negative": "No", "method": "unit", "created_at": 1,
+                      "layers": 2, "dimensions": 3, "difference_norm": 2, "layer_norms": [1, 2]}
+            metadata = source / f"{identifier}.json"
+            metadata.write_text(json.dumps(record), encoding="utf-8")
+            array_file = source / f"{identifier}.npy"
+            for array in (np.ones((2, 2)), np.full((2, 3), np.nan), np.array([[object()]], dtype=object)):
+                np.save(array_file, array)
+                self.assertEqual(server.migrate_vectors(source), 0)
+            np.save(array_file, np.ones((2, 3)))
+            self.assertEqual(server.migrate_vectors(source), 1)
+            self.assertEqual(server.migrate_vectors(source), 0)
+            self.assertEqual(server.vectors_for(record["model_digest"]), [record])
+            self.assertNotIn("best_layer", server.vectors_for(record["model_digest"])[0])
+            metadata.write_text("[]", encoding="utf-8")
+            self.assertEqual(server.migrate_vectors(source), 0)
+
+    def test_forged_saved_identifier_cannot_reference_paths_outside_data(self):
+        (server.DATA / "bad.json").write_text(json.dumps({"id": "../outside", "model_digest": "test", "created_at": 1}), encoding="utf-8")
+        self.assertEqual(server.vectors_for("test"), [])
 
 
 class ExtractEndpointTest(VectorStorageTest):
@@ -89,6 +167,43 @@ class ExtractEndpointTest(VectorStorageTest):
 
 
 class ChatInjectionTest(VectorStorageTest):
+    def test_stop_interrupts_ollama_while_waiting_for_first_response(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        self.addCleanup(listener.close)
+        accepted = threading.Event()
+        finish = threading.Event()
+
+        def stall():
+            client, _ = listener.accept()
+            with client:
+                client.recv(65536)
+                accepted.set()
+                finish.wait(5)
+
+        threading.Thread(target=stall, daemon=True).start()
+        events = []
+        with patch.object(server, "lock", threading.Lock()), patch.object(server, "native", None), patch.object(server, "connection", {"engine": "ollama", "model": "local", "digest": "test"}), patch.object(server, "OLLAMA", f"http://127.0.0.1:{listener.getsockname()[1]}"):
+            response = server.chat(server.Chat(model="local", messages=[{"role": "user", "content": "hi"}]))
+
+            async def collect():
+                events.extend([chunk async for chunk in response.body_iterator])
+
+            worker = threading.Thread(target=lambda: asyncio.run(collect()), daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(accepted.wait(2))
+                self.assertIsNotNone(server.ollama_task)
+                server.stop()
+                worker.join(2)
+                self.assertFalse(worker.is_alive(), "Stop must interrupt the blocked Ollama read")
+                self.assertFalse(server.lock.locked())
+                self.assertTrue(json.loads(events[-1])["cancelled"])
+            finally:
+                finish.set()
+                worker.join(3)
+
     def test_disconnected_stream_releases_model_even_before_first_chunk(self):
         for disconnect_at in ("http.response.start", "http.response.body"):
             native = SimpleNamespace(cancel=threading.Event(), set_steering=lambda *_: None, generate=lambda _: iter([{"type": "done"}]))

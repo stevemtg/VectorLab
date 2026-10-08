@@ -1,15 +1,21 @@
 """Pinned llama.cpp b11146 CPU ABI; real residual capture and additive steering.
 
 The structures below mirror b11146/include/llama.h. Do not substitute an
-arbitrary llama.dll: native ABI changes require updating these bindings.
+arbitrary llama library: native ABI changes require updating these bindings.
+The loader accepts platform-specific shared libraries. These ctypes layouts
+still require ABI and inference validation on each OS/architecture before a
+release; file names alone cannot prove compatibility with b11146.
 """
 from __future__ import annotations
 
 import codecs
 import ctypes as C
+import json
 import os
+import platform
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 
@@ -58,14 +64,68 @@ class ChatMessage(C.Structure):
     _fields_ = [("role", C.c_char_p), ("content", C.c_char_p)]
 
 
+def runtime_platform() -> str:
+    if os.name == "nt":
+        return "win"
+    if sys.platform == "darwin":
+        return "mac"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    raise RuntimeError(f"Unsupported platform for the pinned native runtime: {sys.platform}.")
+
+
+# Pinned b11146 library file names per platform. The win-x64 set ships today;
+# macOS/Linux sets require building llama.cpp b11146 for that platform first.
+RUNTIME_FILES = {
+    "win": {"llama": "llama.dll", "ggml": "ggml.dll", "ggml_base": "ggml-base.dll"},
+    "mac": {"llama": "libllama.dylib", "ggml": "libggml.dylib", "ggml_base": "libggml-base.dylib"},
+    "linux": {"llama": "libllama.so", "ggml": "libggml.so", "ggml_base": "libggml-base.so"},
+}
+
+
+def runtime_available(runtime: Path) -> bool:
+    """Files/provenance check, not proof that the native ABI has been tested."""
+    try:
+        files = RUNTIME_FILES[runtime_platform()]
+    except RuntimeError:
+        return False
+    runtime = Path(runtime)
+    if not all((runtime / name).is_file() for name in files.values()):
+        return False
+    if (runtime / "runtime.json").is_file():
+        try:
+            validate_runtime_manifest(runtime)
+        except (ValueError, OSError):
+            return False
+    elif os.name != "nt" or platform.machine().lower() not in {"amd64", "x86_64"}:
+        return False
+    return any(runtime.glob("ggml-cpu*.dll" if os.name == "nt" else "libggml-cpu*"))
+
+
+def validate_runtime_manifest(runtime):
+    metadata = json.loads((runtime / "runtime.json").read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError("Invalid native runtime manifest.")
+    arch = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine().lower())
+    if metadata.get("ref") != "b11146" or metadata.get("platform") != sys.platform or metadata.get("arch") != arch:
+        raise ValueError("Native runtime provenance does not match b11146 and this process platform/architecture.")
+
+
 class NativeModel:
     def __init__(self, runtime: Path, model_path: Path, emit=lambda event: None):
-        if os.name != "nt":
-            raise RuntimeError("The installed native runtime is the pinned Windows x64 CPU build.")
-        self.dll_directory = os.add_dll_directory(str(runtime))
-        self.ggml_base = C.CDLL(str(runtime / "ggml-base.dll"))
-        self.ggml = C.CDLL(str(runtime / "ggml.dll"))
-        self.lib = C.CDLL(str(runtime / "llama.dll"))
+        runtime = Path(runtime).resolve()
+        if (runtime / "runtime.json").is_file():
+            validate_runtime_manifest(runtime)
+        elif os.name != "nt" or platform.machine().lower() not in {"amd64", "x86_64"}:
+            raise RuntimeError("Supply a validated b11146 runtime.json for this platform and architecture.")
+        files = RUNTIME_FILES[runtime_platform()]
+        missing = [name for name in files.values() if not (runtime / name).is_file()]
+        if missing:
+            raise RuntimeError(f"The pinned b11146 native runtime is unavailable for this platform: missing {', '.join(missing)} under {runtime}.")
+        self.dll_directory = os.add_dll_directory(str(runtime)) if os.name == "nt" else None
+        self.ggml_base = C.CDLL(str(runtime / files["ggml_base"]))
+        self.ggml = C.CDLL(str(runtime / files["ggml"]))
+        self.lib = C.CDLL(str(runtime / files["llama"]))
         self.emit = emit
         self.model = self.ctx = None
         self.cancel = threading.Event()
@@ -392,3 +452,9 @@ class NativeModel:
         if self.model:
             self.lib.llama_model_free(self.model)
             self.model = None
+        if self.dll_directory is not None:
+            try:
+                self.dll_directory.close()
+            except OSError:
+                pass
+            self.dll_directory = None

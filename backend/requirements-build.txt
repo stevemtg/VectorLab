@@ -1,0 +1,3 @@
+# Build host only; not required by the source-tree web workflow.
+-r requirements.txt
+pyinstaller==6.22.3

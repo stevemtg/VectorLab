@@ -1,5 +1,6 @@
 import ctypes as C
 import json
+import os
 from pathlib import Path
 import threading
 import unittest
@@ -7,7 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from backend.native import NativeModel, P, I, FP, RATIO_TARGET, RATIO_PROBES
+from backend.native import NativeModel, P, I, FP, RATIO_TARGET, RATIO_PROBES, runtime_available
 
 
 class NativeGenerationStreamingTest(unittest.TestCase):
@@ -63,12 +64,16 @@ class NativeSteeringTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         root = Path(__file__).resolve().parents[1]
-        manifest = Path.home() / ".ollama/models/manifests/registry.ollama.ai/library/qwen2.5-coder/1.5b"
+        model_root = Path(os.environ.get("OLLAMA_MODELS", str(Path.home() / ".ollama/models")))
+        runtime = Path(os.environ.get("VECTOR_LAB_RUNTIME_DIR", str(root / ".runtime/llama")))
+        manifest = model_root / "manifests/registry.ollama.ai/library/qwen2.5-coder/1.5b"
         if not manifest.exists():
             raise unittest.SkipTest("Requires the user's installed qwen2.5-coder:1.5b model.")
+        if not runtime_available(runtime):
+            raise unittest.SkipTest("Requires a matching b11146 CPU runtime for this process platform/architecture.")
         data = json.loads(manifest.read_text())
         digest = next(layer["digest"] for layer in data["layers"] if layer["mediaType"] == "application/vnd.ollama.image.model")
-        cls.model = NativeModel(root / ".runtime/llama", Path.home() / ".ollama/models/blobs" / digest.replace(":", "-"))
+        cls.model = NativeModel(runtime, model_root / "blobs" / digest.replace(":", "-"))
 
     @classmethod
     def tearDownClass(cls):

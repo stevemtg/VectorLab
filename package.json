@@ -2,6 +2,7 @@
   "name": "site-creator-vinext-starter",
   "version": "0.1.0",
   "private": true,
+  "main": "desktop/main.mjs",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -14,7 +15,15 @@
     "db:generate": "drizzle-kit generate",
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
-    "local": "node scripts/start-local.mjs"
+    "local": "node scripts/start-local.mjs",
+    "dev:electron": "node scripts/desktop.mjs dev",
+    "build:electron": "node scripts/desktop.mjs build",
+    "build:renderer": "vite build --config vite.renderer.config.ts",
+    "test:desktop": "node --test desktop/*.test.mjs",
+    "test:electron": "playwright test --config playwright.electron.config.ts",
+    "package:win": "node scripts/desktop.mjs package --win",
+    "package:mac": "node scripts/desktop.mjs package --mac",
+    "package:linux": "node scripts/desktop.mjs package --linux"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
@@ -53,6 +62,8 @@
     "@vitejs/plugin-react": "6.0.2",
     "@vitejs/plugin-rsc": "0.5.26",
     "drizzle-kit": "0.31.10",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
     "eslint": "9.39.4",
     "eslint-config-next": "16.3.4",
     "json-rpc-2.0": "1.7.1",
